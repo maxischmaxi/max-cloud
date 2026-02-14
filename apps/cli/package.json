@@ -1,0 +1,9 @@
+{
+  "name": "@max-cloud/cli",
+  "private": true,
+  "scripts": {
+    "build": "go build -o bin/maxcloud .",
+    "test": "go test ./...",
+    "lint": "go vet ./..."
+  }
+}

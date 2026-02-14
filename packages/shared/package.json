@@ -1,0 +1,9 @@
+{
+  "name": "@max-cloud/shared",
+  "private": true,
+  "scripts": {
+    "build": "go build ./...",
+    "test": "go test ./...",
+    "lint": "go vet ./..."
+  }
+}
