@@ -9,8 +9,11 @@ import (
 )
 
 var (
-	deployName string
-	deployEnv  []string
+	deployName    string
+	deployEnv     []string
+	deployPort    int
+	deployCommand string
+	deployArgs    string
 )
 
 var deployCmd = &cobra.Command{
@@ -32,12 +35,15 @@ var deployCmd = &cobra.Command{
 		req := models.DeployRequest{
 			Name:    deployName,
 			Image:   image,
+			Port:    deployPort,
+			Command: parseCSV(deployCommand),
+			Args:    parseCSV(deployArgs),
 			EnvVars: envVars,
 		}
 
 		svc, err := client.Deploy(req)
 		if err != nil {
-			return fmt.Errorf("deploy failed: %w", err)
+			return formatError(err)
 		}
 
 		fmt.Printf("Service deployed successfully!\n")
@@ -50,8 +56,26 @@ var deployCmd = &cobra.Command{
 	},
 }
 
+func parseCSV(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	result := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			result = append(result, p)
+		}
+	}
+	return result
+}
+
 func init() {
 	deployCmd.Flags().StringVar(&deployName, "name", "", "Service name (required)")
 	deployCmd.MarkFlagRequired("name")
 	deployCmd.Flags().StringArrayVar(&deployEnv, "env", nil, "Environment variables (KEY=VALUE, repeatable)")
+	deployCmd.Flags().IntVar(&deployPort, "port", 0, "Container port (0 = auto-detect from EXPOSE)")
+	deployCmd.Flags().StringVar(&deployCommand, "command", "", "Override ENTRYPOINT (comma-separated: python,app.py)")
+	deployCmd.Flags().StringVar(&deployArgs, "args", "", "Override CMD (comma-separated: --port,3000)")
 }

@@ -1,0 +1,268 @@
+name: CD - Deploy to Hetzner
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+
+env:
+  GO_VERSION: '1.25'
+  PNPM_VERSION: '9.15'
+
+jobs:
+  build-images:
+    name: Build and Push Containers
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push API image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./apps/api/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/api:latest
+            ghcr.io/${{ github.repository }}/api:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push CLI image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./apps/cli/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/cli:latest
+            ghcr.io/${{ github.repository }}/cli:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to Hetzner
+    runs-on: ubuntu-latest
+    needs: build-images
+    environment: ${{ github.event.inputs.environment || 'production' }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        uses: azure/k8s-set-context@v4
+        with:
+          kubeconfig: ${{ secrets.KUBECONFIG }}
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: 'v3.15.0'
+
+      - name: Deploy ExternalDNS
+        run: |
+          kubectl create namespace external-dns --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create secret generic external-dns-hetzner \
+            --from-literal=api-token=${{ secrets.HETZNER_API_TOKEN }} \
+            --namespace external-dns \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl apply -f deploy/external-dns.yaml
+
+      - name: Deploy cert-manager
+        run: |
+          kubectl create namespace cert-manager --dry-run=client -o yaml | kubectl apply -f -
+          kubectl apply -f deploy/cert-manager.yaml
+
+      - name: Deploy Knative
+        run: |
+          kubectl apply -f https://github.com/knative/serving/releases/download/knative-v1.14.0/serving-core.yaml
+          kubectl apply -f https://github.com/knative/net-kourier/releases/download/knative-v1.14.0/kourier.yaml
+          kubectl patch configmap/config-network \
+            --namespace knative-serving \
+            --type merge \
+            --patch '{"data":{"ingress-class":"kourier.ingress.networking.knative.dev"}}'
+
+      - name: Configure Knative Domain
+        run: |
+          kubectl apply -f - <<EOF
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: config-domain
+            namespace: knative-serving
+          data:
+            ${{ secrets.DNS_ZONE }}: ""
+          EOF
+
+      - name: Deploy max-cloud API
+        run: |
+          kubectl create namespace max-cloud --dry-run=client -o yaml | kubectl apply -f -
+          
+          # Create kubeconfig secret from the actual kubeconfig content
+          echo "${{ secrets.KUBECONFIG }}" > /tmp/kubeconfig
+          kubectl create secret generic max-cloud-kubeconfig \
+            --from-file=kubeconfig=/tmp/kubeconfig \
+            --namespace max-cloud \
+            --dry-run=client -o yaml | kubectl apply -f -
+          rm /tmp/kubeconfig
+          
+          # Create deployment with health probes
+          kubectl apply -f - <<EOF
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: max-cloud-api
+            namespace: max-cloud
+          spec:
+            replicas: 2
+            selector:
+              matchLabels:
+                app: max-cloud-api
+            template:
+              metadata:
+                labels:
+                  app: max-cloud-api
+              spec:
+                containers:
+                - name: api
+                  image: ghcr.io/${{ github.repository }}/api:${{ github.sha }}
+                  ports:
+                  - containerPort: 8080
+                  env:
+                  - name: PORT
+                    value: "8080"
+                  - name: KUBECONFIG
+                    value: /kube/kubeconfig
+                  - name: KNATIVE_NAMESPACE
+                    value: default
+                  - name: DATABASE_URL
+                    valueFrom:
+                      secretKeyRef:
+                        name: max-cloud-secrets
+                        key: database-url
+                  - name: RESEND_API_KEY
+                    valueFrom:
+                      secretKeyRef:
+                        name: max-cloud-secrets
+                        key: resend-api-key
+                  - name: EMAIL_FROM
+                    value: "noreply@${{ secrets.DNS_ZONE }}"
+                  - name: DEV_MODE
+                    value: "false"
+                  livenessProbe:
+                    httpGet:
+                      path: /healthz
+                      port: 8080
+                    initialDelaySeconds: 5
+                    periodSeconds: 10
+                  readinessProbe:
+                    httpGet:
+                      path: /healthz
+                      port: 8080
+                    initialDelaySeconds: 5
+                    periodSeconds: 5
+                  resources:
+                    requests:
+                      cpu: 100m
+                      memory: 128Mi
+                    limits:
+                      cpu: 500m
+                      memory: 512Mi
+                  volumeMounts:
+                  - name: kubeconfig
+                    mountPath: /kube
+                    readOnly: true
+                volumes:
+                - name: kubeconfig
+                  secret:
+                    secretName: max-cloud-kubeconfig
+          EOF
+          
+          # Create secrets
+          kubectl create secret generic max-cloud-secrets \
+            --from-literal=database-url="${{ secrets.DATABASE_URL }}" \
+            --from-literal=resend-api-key="${{ secrets.RESEND_API_KEY }}" \
+            --namespace max-cloud \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Deploy max-cloud API Service
+        run: |
+          kubectl apply -f - <<EOF
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: max-cloud-api
+            namespace: max-cloud
+          spec:
+            ports:
+            - port: 80
+              targetPort: 8080
+            selector:
+              app: max-cloud-api
+          EOF
+
+      - name: Verify deployment
+        run: |
+          echo "⏳ Warte auf Pods..."
+          kubectl wait --for=condition=Available deployment/max-cloud-api --namespace max-cloud --timeout=300s
+          
+          echo "📊 Pod Status:"
+          kubectl get pods -n max-cloud
+          
+          echo "🌐 Services:"
+          kubectl get svc -n max-cloud
+          
+          echo "✅ Deployment erfolgreich!"
+
+  test-api:
+    name: Test API Deployment
+    runs-on: ubuntu-latest
+    needs: deploy
+    steps:
+      - name: Setup kubectl
+        uses: azure/k8s-set-context@v4
+        with:
+          kubeconfig: ${{ secrets.KUBECONFIG }}
+
+      - name: Wait for API to be ready
+        run: |
+          sleep 30
+          
+          # Port-forward to test API locally
+          kubectl port-forward svc/max-cloud-api 8080:80 -n max-cloud &
+          sleep 5
+          
+          for i in {1..30}; do
+            if curl -s -f "http://localhost:8080/healthz" > /dev/null 2>&1; then
+              echo "✅ API ist erreichbar!"
+              curl -s "http://localhost:8080/healthz"
+              exit 0
+            fi
+            echo "⏳ Warte auf API... ($i/30)"
+            sleep 5
+          done
+          
+          echo "❌ API nicht erreichbar nach 150 Sekunden"
+          exit 1

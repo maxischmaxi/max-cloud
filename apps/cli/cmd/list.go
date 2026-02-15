@@ -2,8 +2,8 @@ package cmd
 
 import (
 	"fmt"
-	"text/tabwriter"
 	"os"
+	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 )
@@ -14,7 +14,7 @@ var listCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		services, err := client.ListServices()
 		if err != nil {
-			return fmt.Errorf("list failed: %w", err)
+			return formatError(err)
 		}
 
 		if len(services) == 0 {

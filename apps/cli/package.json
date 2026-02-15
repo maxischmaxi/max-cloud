@@ -4,6 +4,6 @@
   "scripts": {
     "build": "go build -o bin/maxcloud .",
     "test": "go test ./...",
-    "lint": "go vet ./..."
+    "lint": "golangci-lint run ./..."
   }
 }

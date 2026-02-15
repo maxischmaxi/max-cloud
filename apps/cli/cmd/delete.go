@@ -14,7 +14,7 @@ var deleteCmd = &cobra.Command{
 		id := args[0]
 
 		if err := client.DeleteService(id); err != nil {
-			return fmt.Errorf("delete failed: %w", err)
+			return formatError(err)
 		}
 
 		fmt.Printf("Service %s deleted.\n", id)

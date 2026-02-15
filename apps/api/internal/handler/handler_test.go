@@ -2,20 +2,22 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/max-cloud/api/internal/store"
 	"github.com/max-cloud/shared/pkg/models"
 )
 
-func setup() (*Handler, *store.Store) {
-	s := store.New()
-	h := New(slog.Default(), s)
+func setup() (*Handler, *store.MemoryStore) {
+	s := store.NewMemory()
+	h := New(slog.Default(), s, s, nil, nil, 24*time.Hour, true, "registry.local", "test-secret", 1*time.Hour)
 	return h, s
 }
 
@@ -69,6 +71,34 @@ func TestCreateService(t *testing.T) {
 	}
 }
 
+func TestCreateServiceWithPortCommandArgs(t *testing.T) {
+	h, _ := setup()
+	payload := `{"name":"api","image":"node:20","port":3000,"command":["node","server.js"],"args":["--verbose"],"env_vars":{"NODE_ENV":"production"}}`
+	req := httptest.NewRequest("POST", "/api/v1/services", bytes.NewBufferString(payload))
+	w := httptest.NewRecorder()
+
+	h.CreateService(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var svc models.Service
+	json.NewDecoder(w.Body).Decode(&svc)
+	if svc.Port != 3000 {
+		t.Fatalf("expected port 3000, got %d", svc.Port)
+	}
+	if len(svc.Command) != 2 || svc.Command[0] != "node" || svc.Command[1] != "server.js" {
+		t.Fatalf("expected command [node, server.js], got %v", svc.Command)
+	}
+	if len(svc.Args) != 1 || svc.Args[0] != "--verbose" {
+		t.Fatalf("expected args [--verbose], got %v", svc.Args)
+	}
+	if svc.EnvVars["NODE_ENV"] != "production" {
+		t.Fatalf("expected NODE_ENV=production, got %v", svc.EnvVars)
+	}
+}
+
 func TestCreateServiceValidation(t *testing.T) {
 	h, _ := setup()
 
@@ -113,8 +143,8 @@ func TestListServicesEmpty(t *testing.T) {
 
 func TestListServicesWithData(t *testing.T) {
 	h, s := setup()
-	s.Create(models.DeployRequest{Name: "a", Image: "img"})
-	s.Create(models.DeployRequest{Name: "b", Image: "img"})
+	s.Create(context.Background(), models.DeployRequest{Name: "a", Image: "img"})
+	s.Create(context.Background(), models.DeployRequest{Name: "b", Image: "img"})
 
 	req := httptest.NewRequest("GET", "/api/v1/services", nil)
 	w := httptest.NewRecorder()
@@ -130,7 +160,7 @@ func TestListServicesWithData(t *testing.T) {
 
 func TestGetServiceAndDelete(t *testing.T) {
 	h, s := setup()
-	created := s.Create(models.DeployRequest{Name: "app", Image: "img"})
+	created, _ := s.Create(context.Background(), models.DeployRequest{Name: "app", Image: "img"})
 
 	// Use chi router for proper URL param extraction
 	r := chi.NewRouter()

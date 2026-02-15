@@ -1,0 +1,38 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: registry-config
+  namespace: maxcloud-registry
+data:
+  config.yml: |
+    version: 0.1
+    log:
+      level: info
+    storage:
+      s3:
+        accesskey: ${S3_ACCESS_KEY}
+        secretkey: ${S3_SECRET_KEY}
+        region: eu-central
+        regionendpoint: https://fsn1.your-objectstorage.com
+        bucket: maxcloud-registry
+        forcepathstyle: true
+        secure: true
+      delete:
+        enabled: true
+      cache:
+        blobdescriptor: inmemory
+    auth:
+      token:
+        realm: https://api.maxcloud.dev/api/v1/registry/token
+        service: registry.maxcloud.dev
+        issuer: max-cloud
+        autoredirect: true
+    http:
+      addr: :5000
+      headers:
+        X-Content-Type-Options: [nosniff]
+    health:
+      storagedriver:
+        enabled: true
+        interval: 10s
+        threshold: 3
